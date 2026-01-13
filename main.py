@@ -624,6 +624,11 @@ WALLETS = {
             "name": "OKX 핫",
             "main": True
         },
+                {
+            "addr": "0x0D0707963952f2fBA59dD06f2b425ace40b492Fe",
+            "name": "게이트 핫",
+            "main": True
+        },
     ],
     'POL': [
         {
