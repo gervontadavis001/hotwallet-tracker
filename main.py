@@ -7,6 +7,11 @@ from datetime import datetime
 st.set_page_config(page_title="🔥 핫월렛 트래커", layout="wide")
 
 # ==========================================
+# Helius API 키 (Streamlit Secrets에서 로드)
+# ==========================================
+HELIUS_API_KEY = st.secrets.get("HELIUS_API_KEY", "")
+
+# ==========================================
 # 다중 RPC URLs
 # ==========================================
 RPC_URLS = {
@@ -56,13 +61,24 @@ RPC_URLS = {
         "https://rpc.ankr.com/polygon",
     ],
     'SOL': [
-        "https://api.mainnet-beta.solana.com",
-        "https://rpc.ankr.com/solana",
+        # Helius API가 있으면 우선 사용
     ],
     'SUI': [
         "https://fullnode.mainnet.sui.io:443",
     ],
 }
+
+# Helius API 키가 있으면 SOL RPC에 추가
+if HELIUS_API_KEY:
+    RPC_URLS['SOL'] = [
+        f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}",
+    ]
+else:
+    RPC_URLS['SOL'] = [
+        "https://rpc.ankr.com/solana",
+        "https://solana.drpc.org",
+        "https://api.mainnet-beta.solana.com",
+    ]
 
 EXPLORER = {
     'ETH': 'https://etherscan.io/address/',
@@ -856,13 +872,11 @@ def get_evm_balance(chain, wallet, contract, decimals):
 
 
 def get_solana_balance(wallet, token_mint):
-    """Solana 토큰 잔고 조회 (HTML과 동일 방식)"""
-    rpc_urls = [
-        'https://rpc.ankr.com/solana', 'https://solana.drpc.org',
-        'https://api.mainnet-beta.solana.com'
-    ]
+    """Solana 토큰 잔고 조회 (다중 RPC)"""
+    rpc_list = RPC_URLS.get('SOL', []).copy()
+    random.shuffle(rpc_list)
 
-    for rpc_url in rpc_urls:
+    for rpc_url in rpc_list:
         try:
             payload = {
                 'jsonrpc':
@@ -1037,12 +1051,21 @@ if contract:
     progress_bar = st.progress(0)
     status_text = st.empty()
 
-    # 솔라나는 순차 처리 (Rate limit 방지)
-    if chain == 'SOL':
-        import time
-        for i, w in enumerate(wallets):
+    # ★ SOL도 병렬 처리 (Helius API 사용시)
+    # 워커 수: Helius면 6개, 공개 RPC면 3개
+    sol_workers = 6 if HELIUS_API_KEY else 3
+
+    with ThreadPoolExecutor(max_workers=10 if chain != 'SOL' else sol_workers) as executor:
+        futures = {
+            executor.submit(fetch_balance, chain, w['addr'], contract, decimals): w
+            for w in wallets
+        }
+
+        completed = 0
+        for future in as_completed(futures):
+            w = futures[future]
             try:
-                balance = get_solana_balance(w['addr'], contract)
+                balance = future.result()
             except:
                 balance = 0
 
@@ -1055,38 +1078,9 @@ if contract:
                 'usd': usd
             })
 
-            progress_bar.progress((i + 1) / len(wallets))
-            status_text.text(f'조회 중... ({i + 1}/{len(wallets)})')
-            time.sleep(0.25)  # 0.8초 대기 (Rate limit 방지)
-    else:
-        # 다른 체인은 병렬 처리 (워커 10개)
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {
-                executor.submit(fetch_balance, chain, w['addr'], contract, decimals):
-                w
-                for w in wallets
-            }
-
-            completed = 0
-            for future in as_completed(futures):
-                w = futures[future]
-                try:
-                    balance = future.result()
-                except:
-                    balance = 0
-
-                usd = balance * token_info['price']
-                results.append({
-                    'name': w['name'],
-                    'addr': w['addr'],
-                    'main': w['main'],
-                    'balance': balance,
-                    'usd': usd
-                })
-
-                completed += 1
-                progress_bar.progress(completed / len(wallets))
-                status_text.text(f'조회 중... ({completed}/{len(wallets)})')
+            completed += 1
+            progress_bar.progress(completed / len(wallets))
+            status_text.text(f'조회 중... ({completed}/{len(wallets)})')
 
     progress_bar.empty()
     status_text.empty()
